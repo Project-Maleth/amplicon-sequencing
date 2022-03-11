@@ -3,8 +3,8 @@
 ### Create conda environment
 
 ```
-conda create --name asap
-source activate asap
+conda create --name asap2
+source activate asap2
 ```
 
 and follow the instructions to install ASAP 2 and its dependencies (eg. QIIME 2)

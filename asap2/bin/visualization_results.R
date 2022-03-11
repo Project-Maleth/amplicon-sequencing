@@ -6,7 +6,7 @@ library(gplots)
 library(grid)
 library(ComplexHeatmap)
 
-# alpha diversity metrics
+# alpha diversity metrics:
 # shannon, faith and obversed_features
 
 shannon<-read_qza("shannon_vector.qza")
@@ -23,12 +23,11 @@ shannon$sample_type [ which(shannon$sample_type=='ISS') ] <- 'ISS Tissue sample'
 shannon$sample_type [ which(shannon$sample_type=='SK') ] <- 'Skin swab'
 shannon$sample_type [ which(shannon$sample_type=='TIS') ] <- 'Tissue'
 
-
 p1 <- ggplot(shannon, aes(x=sample_type, y=shannon_entropy)) + 
   geom_boxplot(alpha=0.5) + geom_point(aes(color=sample_type),size=0.6)+  theme_q2r()+   theme(legend.title=element_blank())+
   theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
   ylab('Shannon diversity')+xlab('')
-p1
+
 ###############################
 observed_features<-read_qza("observed_features_vector.qza")
 
@@ -44,12 +43,11 @@ observed_features$sample_type [ which(observed_features$sample_type=='ISS') ] <-
 observed_features$sample_type [ which(observed_features$sample_type=='SK') ] <- 'Skin swab'
 observed_features$sample_type [ which(observed_features$sample_type=='TIS') ] <- 'Tissue'
 
-
 p2 <- ggplot(observed_features, aes(x=sample_type, y=observed_features)) + 
   geom_boxplot(alpha=0.5) + geom_point(aes(color=sample_type),size=0.6)+  theme_q2r()+   theme(legend.title=element_blank())+
   theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
   ylab('Observed features (ASV)')+xlab('')
-p2
+
 ###############################
 faith_pd<-read_qza("faith_pd_vector.qza")
 
@@ -69,7 +67,7 @@ p3 <- ggplot(faith_pd, aes(x=sample_type, y=faith_pd)) +
   geom_boxplot(alpha=0.5) + geom_point(aes(color=sample_type),size=0.6)+  theme_q2r()+   theme(legend.title=element_blank())+
   theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
   ylab('Faith\'s phylogenetic diversity')+xlab('')
-p3
+
 ###############################
 p1 + p2 + p3      # samples with low sequenced depth are not shown
 ggsave('alpha_diversity.pdf', height=3.2, width=11.3)
@@ -102,8 +100,6 @@ ha = HeatmapAnnotation(Sample_Type = annota,
 
 pdf('beta_diversity.pdf', height=4, width=7.2)
 Heatmap(as.matrix( beta$data ), top_annotation = ha, heatmap_legend_param = list(
-  #at = c(-2, 0, 2),
-  #labels = c("low", "zero", "high"),
   title = "Beta diversity",
   legend_height = unit(4, "cm"),
   title_position = "lefttop"
@@ -130,7 +126,6 @@ SVs<-apply(SVs, 2, function(x) x/sum(x, na.rm=T)*100) #convert to percent
 # remove rows
 SVs<-SVs[ which(rownames(SVs)!='Unnamed..2'),]
 SVs<-SVs[ which(rownames(SVs)!='barcode.sequence'),]
-
 
 SVsToPlot<-  
   data.frame(MeanAbundance=rowMeans(SVs)) %>% #find the average abundance of a SV
@@ -159,7 +154,6 @@ SVs %>%
   scale_fill_viridis_c(name="log10(% Abundance)") 
 
 ggsave("level2.pdf", height=4, width=11, device="pdf")
-
 
 ####################################################
 taxonomy <-read.csv("taxonomy_level5.txt")

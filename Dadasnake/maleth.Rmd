@@ -1,0 +1,268 @@
+---
+title: "maleth"
+output: html_notebook
+---
+
+
+
+```{r}
+library(umap)
+library(tidyverse)
+library(ggplot2)
+library(circlize)
+library(ggtree)
+library(vegan)
+library(ggrepel)
+library(ComplexHeatmap)
+library(decontam)
+library(lme4)
+library(broom)
+library(lmerTest)
+library(broom.mixed)
+library(ggpubr)
+library(reshape2)
+library(cowplot)
+
+theme_set(theme_cowplot())
+
+```
+
+
+```{r}
+setwd('~/Dropbox (Mason Lab)//maltese_16S/processed_data/')
+
+# dataprep
+
+metadata = read.csv('../maleth_metadata.csv')
+output = read.table('post/filtered.seqTab.tsv',sep='\t',header=T)
+counts = output %>% select(OTU,all_of(grep('lane',colnames(output))))
+colnames(counts)=gsub('lane1','',colnames(counts))
+
+# LOOK FOR CONTAMINANTS -- NONE FOUND
+negatives = metadata %>% filter(SAMPLE_TYPE_CLEAN == 'Negative control') %>% select(SEQ_ID) %>% unlist %>% unname
+vector_for_decontam = colnames(counts) %in% negatives
+contaminants = isContaminant(counts %>% column_to_rownames('OTU') %>% as.matrix, neg=vector_for_decontam,method="prevalence")
+contaminants = row.names(contaminants[contaminants$contaminant == TRUE, ])
+
+
+# sum over identical taxa
+otu_metadata_temp = output %>% select(OTU,all_of(grep('mothur',colnames(output)))) %>% select(-`Domain.mothur.SILVA_138_SSURef_NR99_cut.1`)
+colnames(otu_metadata_temp) = strsplit(colnames(otu_metadata_temp),'\\.') %>% map_chr(1) 
+otu_metadata_temp = otu_metadata_temp %>% select(OTU,taxonomy)
+
+temp = left_join(counts,otu_metadata_temp)
+temp = temp %>% melt() %>% select(-OTU) %>% group_by(taxonomy,variable) %>% summarise(value = sum(value))  %>% ungroup %>% distinct %>% dcast(taxonomy~variable,value.var='value')
+
+# normalize and merge data
+counts_norm = temp %>% mutate_at(vars(-taxonomy), funs(./sum(.))) 
+counts_norm_melt = melt(counts_norm)
+colnames(counts_norm_melt) = c('taxonomy','SEQ_ID','value')
+counts_norm_melt_mdat = left_join(counts_norm_melt,metadata)
+otu_metadata = output %>% select(all_of(grep('mothur',colnames(output)))) %>% select(-`Domain.mothur.SILVA_138_SSURef_NR99_cut.1`) %>% unique
+colnames(otu_metadata) = strsplit(colnames(otu_metadata),'\\.') %>% map_chr(1)
+counts_norm_melt_mdat_otu = left_join(counts_norm_melt_mdat,otu_metadata) %>% select(-SAMPLE_TYPE,-SAMPLE_ID,-PATIENT) %>% rename(OTU = taxonomy)
+
+```
+
+```{r}
+# PCA and UMAP
+setwd('~/Dropbox (Mason Lab)/maltese_16S')
+
+norm_counts_wide = dcast(data = counts_norm_melt_mdat_otu, OTU ~ SEQ_ID,value.var='value') %>% column_to_rownames('OTU') %>% select(-all_of(negatives))
+pca_out = prcomp(norm_counts_wide)
+varexp = summary(pca_out)[[1]][1:2]
+
+pca_out = pca_out$rotation %>% data.frame %>% rownames_to_column('SEQ_ID')
+pca_out = left_join(pca_out,metadata)
+
+
+colnames(pca_out)[2] = paste('PC1 -- ',round(varexp[[1]]*100),'% variance explained',sep='')
+colnames(pca_out)[3] = paste('PC2 -- ',round(varexp[[2]]*100),'% variance explained',sep='')
+
+ggplot(data = pca_out,aes(x = pca_out[,2], y = pca_out[,3], color = as.factor(SAMPLE_TYPE_CLEAN))) + geom_point(size=5)+ ggtitle('PCA') + xlab(colnames(pca_out)[2]) + ylab(colnames(pca_out)[3])
+ggsave('pca_output.pdf',width=9,height=6)
+
+umap = umap(t(norm_counts_wide))$layout %>% data.frame %>% rownames_to_column('SEQ_ID')
+umap = left_join(umap,metadata)
+
+ggplot(data = umap,aes(x = X1, y = X2, color = as.factor(SAMPLE_TYPE_CLEAN))) + geom_point(size=5) + ggtitle('UMAP')
+ggsave('umap_output.pdf',width=9,height=6)
+```
+
+```{r} 
+setwd('~/Dropbox (Mason Lab)/maltese_16S/')
+
+# compute and plot alpha diversity by sample type
+norm_counts_wide = dcast(data = counts_norm_melt_mdat_otu, OTU ~ SEQ_ID,value.var='value') %>% column_to_rownames('OTU')
+
+richness = map(colnames(norm_counts_wide), function(x) length(which(norm_counts_wide[,x]!=0))) %>% unlist %>% unname
+shannon = map(colnames(norm_counts_wide), function(x) vegan::diversity(norm_counts_wide[,x],index='shannon')) %>% unlist %>% unname
+simpson = map(colnames(norm_counts_wide), function(x) vegan::diversity(norm_counts_wide[,x],index='simpson')) %>% unlist %>% unname
+
+divs = as.data.frame(list(richness = richness,simpson = simpson,shannon = shannon))
+rownames(divs) = colnames(norm_counts_wide)  
+divs_mdat = left_join(divs %>% rownames_to_column('SEQ_ID'),metadata)
+
+divs = as.data.frame(list(richness = richness,simpson = simpson,shannon = shannon))
+rownames(divs) = colnames(norm_counts_wide)  
+divs_mdat = left_join(divs %>% rownames_to_column('SEQ_ID'),metadata) %>% select(-PATIENT)
+divs_mdat_melted = melt(divs_mdat) %>% filter(SAMPLE_TYPE_CLEAN!='Negative control')
+
+divs_mdat_melted$SAMPLE_TYPE_CLEAN=factor(divs_mdat_melted$SAMPLE_TYPE_CLEAN,levels=c('Negative control','Biofilm','Earth control Tissue sample','ISS Tissue sample','Skin swab','Tissue')) 
+
+my_comparisons <- list( c("ISS Tissue sample", "Earth control Tissue sample"), c("ISS Tissue sample", "2"), c("0.5", "2") )
+
+ggplot(data = divs_mdat_melted%>% filter(SAMPLE_TYPE_CLEAN!='Negative control'), aes(x = as.factor(SAMPLE_TYPE_CLEAN), y = value)) + geom_boxplot()+ theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust=1)) + geom_point(size=3,aes(color =as.factor(SAMPLE_TYPE_CLEAN) ,fill=as.factor(SAMPLE_TYPE_CLEAN)), position = position_dodge(0.2))  +facet_grid(scales='free',rows= vars(variable))
+ggsave('diversity_analysis.pdf',width=10,height=10)
+
+richcomp = compare_means(data = divs_mdat_melted %>% filter(variable=='richness') ,value ~ SAMPLE_TYPE_CLEAN,method='wilcox.test')  %>% mutate(diversity_type = 'RICHNESS')
+simpcomp = compare_means(data = divs_mdat_melted %>% filter(variable=='simpson') ,value ~ SAMPLE_TYPE_CLEAN,method='wilcox.test') %>% mutate(diversity_type = 'SIMPSON')
+shancomp = compare_means(data = divs_mdat_melted %>% filter(variable=='shannon') ,value ~ SAMPLE_TYPE_CLEAN,method='wilcox.test')%>% mutate(diversity_type = 'SHANNON')
+
+summary_comps = bind_rows(richcomp,simpcomp,shancomp)
+write.csv(summary_comps,'differential_diversity.csv')
+
+```
+
+```{r}
+#beta div
+
+setwd('~/Dropbox (Mason Lab)/maltese_16S/')
+
+counts_norm2 = counts_norm_melt_mdat_otu %>% select(OTU,SEQ_ID,value) %>% dcast(OTU ~ SEQ_ID, value.var = "value") %>% column_to_rownames('OTU')
+
+beta_dist = as.matrix(vegdist(t(counts_norm2) %>% as.data.frame,index = "bray")) %>% as.data.frame %>% rownames_to_column('SEQ_ID')
+
+beatdivmeta = left_join(beta_dist,metadata) %>% filter(SAMPLE_TYPE_CLEAN != 'Negative control')%>% column_to_rownames('SEQ_ID')
+
+annotationdata = beatdivmeta %>% select(SAMPLE_ID,PATIENT,SAMPLE_TYPE,SAMPLE_TYPE_CLEAN)
+
+forheatmap = beatdivmeta %>% select(-SAMPLE_ID,-PATIENT,-SAMPLE_TYPE,-SAMPLE_TYPE_CLEAN) 
+
+row_ha = rowAnnotation(`SAMPLE TYPE` = annotationdata$SAMPLE_TYPE_CLEAN)
+
+pdf('beta_diversity_heatmap.pdf',width=20,height=20)
+Heatmap(forheatmap, show_row_names = F, show_column_names = F, right_annotation = row_ha)
+dev.off()
+```
+
+
+```{r}
+# abundances by individual by sample type
+# must be run after preceding section
+setwd('~/Dropbox (Mason Lab)/maltese_16S/')
+
+forabundance = left_join(t(counts_norm2) %>% as.data.frame %>% rownames_to_column('SEQ_ID'),metadata) %>% column_to_rownames('SEQ_ID') #%>% filter(SAMPLE_TYPE_CLEAN != 'Negative control')
+
+# get fractions
+forabundancefracs = forabundance %>% select(SAMPLE_TYPE_CLEAN,all_of(grep(';',colnames(forabundance))))
+
+counts = forabundancefracs %>% select(SAMPLE_TYPE_CLEAN) %>% table %>% data.frame
+colnames(counts) = c('SAMPLE_TYPE_CLEAN','FREQ')
+
+forabundancefracs = forabundancefracs %>% melt
+forabundancefracs$value[forabundancefracs$value>0]=1
+forabundancefracs = forabundancefracs %>% group_by(SAMPLE_TYPE_CLEAN,variable) %>% summarise(value=sum(value)) 
+forabundancefracs = left_join(forabundancefracs,counts)
+forabundancefracs$frac = forabundancefracs$value/forabundancefracs$FREQ
+forabundancefracs_wide = forabundancefracs %>% select(SAMPLE_TYPE_CLEAN,variable,frac) %>% dcast(SAMPLE_TYPE_CLEAN ~ variable,value.var ='frac') %>% column_to_rownames('SAMPLE_TYPE_CLEAN')
+
+tokeep = table(otu_metadata$Phylum) %>% data.frame %>% filter(Freq>3) %>% filter(Var1 !='') %>% select(Var1)%>% unlist %>% unname %>% unique
+colanno = otu_metadata %>% select(taxonomy,Phylum) %>% unique %>% mutate(Phylum = if_else(Phylum %in% tokeep,Phylum,'Other')) %>% as_tibble %>% column_to_rownames('taxonomy')
+
+#annotationdata = forabundance %>% select(SAMPLE_ID,PATIENT,SAMPLE_TYPE,SAMPLE_TYPE_CLEAN)
+
+#forheatmap = forabundance %>% select(-SAMPLE_ID,-PATIENT,-SAMPLE_TYPE,-SAMPLE_TYPE_CLEAN) 
+
+#row_ha = rowAnnotation(`SAMPLE TYPE` = annotationdata$SAMPLE_TYPE_CLEAN)
+#col_ha = columnAnnotation(`Phylum` = colanno$Phylum)
+
+#pdf('abundance_diversity_heatmap.pdf',width=60,height=40)
+#Heatmap(forheatmap, show_row_names = F, show_column_names = F, right_annotation = row_ha,bottom_annotation= col_ha)
+#dev.off()
+
+# most abundant bugs in each sample type
+ablong = melt(forabundance %>% rownames_to_column('SEQ_ID')) 
+ablong = ablong %>% group_by(variable,SAMPLE_TYPE_CLEAN) %>% summarize(value = mean(value))
+ablong = ablong %>% filter(SAMPLE_TYPE_CLEAN!='Negative control')
+
+forheatmap = dcast(data = ablong, SAMPLE_TYPE_CLEAN ~ variable,value.var='value') %>% select(-PATIENT) %>% column_to_rownames('SAMPLE_TYPE_CLEAN')
+#forheatmap = forheatmap %>% select(-all_of(data.frame(colSums(forheatmap)) %>% filter(.==0) %>% rownames))
+
+col_fun = circlize::colorRamp2(c(0,.25,.5,.75,1), c("black","grey", "white", "red","green"))
+
+
+col_ha = columnAnnotation(`Phylum` = colanno$Phylum)
+col_ha2 = columnAnnotation(col = list(`Skin swab` = col_fun,`Tissue` = col_fun,`Earth control Tissue sample` = col_fun,`ISS Tissue sample` = col_fun,`Biofilm` = col_fun),`Skin swab` = unlist(unname(forabundancefracs_wide["Skin swab",])),`Tissue` = unlist(unname(forabundancefracs_wide["Tissue",])),`Earth control Tissue sample` = unlist(unname(forabundancefracs_wide["Earth control Tissue sample",])),`ISS Tissue sample` = unlist(unname(forabundancefracs_wide["ISS Tissue sample",])),`Biofilm` = unlist(unname(forabundancefracs_wide["Biofilm",])))
+
+pdf('abundance_diversity_heatmap.pdf',width=18,height=10)
+Heatmap(log(forheatmap+0.00001), show_row_names = T, show_column_names = F,bottom_annotation= col_ha,top_annotation=col_ha2)
+dev.off()
+
+```
+
+```{r}
+# needs to be run right after preceding section
+
+setwd('~/Dropbox (Mason Lab)/maltese_16S/')
+
+# list most abundant bugs in ISS vs Earth controls
+
+forabundancefracs = forabundancefracs %>% select(SAMPLE_TYPE_CLEAN,variable,frac)
+
+ablong = ablong %>% group_by(variable,SAMPLE_TYPE_CLEAN) %>% summarize(value = mean(value))
+
+forspecificplot = left_join(melt(forabundance) %>% group_by(variable,SAMPLE_TYPE_CLEAN) %>% summarize(sd=sd(value),value = mean(value)),forabundancefracs) %>% filter(variable != 'PATIENT')
+forspecificplot = left_join(forspecificplot,otu_metadata,by=c('variable'='taxonomy'))
+
+forspecificplotgroups = forspecificplot %>% select(value,variable,SAMPLE_TYPE_CLEAN) %>% group_by(SAMPLE_TYPE_CLEAN) %>% slice_max(order_by = value,n =5) %>%ungroup %>% unique  %>% select(-value) %>% rename(GROUP = SAMPLE_TYPE_CLEAN)
+
+forspecificplot_sub = forspecificplot %>% filter(variable %in% forspecificplotgroups$variable %>% unlist %>% unname %>% unique)
+forspecificplotgroups$order = seq(1,nrow(forspecificplotgroups))
+
+forspecificplot_sub = left_join(forspecificplot_sub,forspecificplotgroups,by='variable')
+
+forspecificplot_sub$variable = fct_reorder(as.factor(forspecificplot_sub$variable),forspecificplot_sub$order)
+
+forspecificplot_sub$value = log(forspecificplot_sub$value + 1,10)
+forspecificplot_sub$sd = log(forspecificplot_sub$sd + 1,10)
+forspecificplot_sub = forspecificplot_sub
+
+ggplot(data = forspecificplot_sub, aes(x = value, y = variable,fill = SAMPLE_TYPE_CLEAN,group = SAMPLE_TYPE_CLEAN)) +geom_bar(stat='identity',position='dodge') + theme(axis.text.y = element_text(size=15))+geom_errorbar(aes(y=variable,xmin=value-sd, xmax=value+sd,group = SAMPLE_TYPE_CLEAN), alpha=0.9,width=.05,position=position_dodge(width=0.9))
+
+ggsave('top_orgs_barplot.pdf',width=20,height=7)
+
+```
+
+
+```{r}
+# associations between sample types
+setwd('~/Dropbox (Mason Lab)/maltese_16S/')
+
+otus = unique(counts_norm_melt_mdat_otu$OTU)
+
+counts_norm_melt_mdat_otu2 = left_join(counts_norm_melt_mdat_otu,counts_norm_melt_mdat %>% select(SEQ_ID,PATIENT) %>% unique)
+
+counts_norm_melt_mdat_otu2$SAMPLE_TYPE_CLEAN = factor(counts_norm_melt_mdat_otu2$SAMPLE_TYPE_CLEAN,levels=c('Skin swab','Earth control Tissue sample','ISS Tissue sample','Negative control','Tissue','Biofilm'))
+
+out= list()
+for(o in otus){
+  val = strsplit(o,';')[[1]]
+  val=val[length(val)]
+  sub = counts_norm_melt_mdat_otu2 %>% filter(OTU == o) %>% select(value,PATIENT,SAMPLE_TYPE_CLEAN) %>% unique
+  p=ggplot(sub,aes(x=log(value+0.00001),y=SAMPLE_TYPE_CLEAN)) + geom_violin() + xlab('ln(relative abundance)') + ylab('') + stat_summary(fun = "mean", geom = "crossbar",  width = 0.5, colour = "black")+ggtitle((val))
+  ggsave(paste('violin/',o,'violin.pdf',sep=''),width=6,height=8)
+  out[[o]]=lmer(data = sub,log(value+0.00001) ~ SAMPLE_TYPE_CLEAN + (1|PATIENT)) %>% broom.mixed::tidy() %>% filter(effect == 'fixed',term !='(Intercept)') %>% mutate(term = gsub('SAMPLE_TYPE_CLEAN','',term)) %>% mutate(OTU = o)
+}
+
+out_merged = bind_rows(out) %>% mutate(BY = p.adjust(p.value,method='BY'))
+out_merged = left_join(out_merged,otu_metadata %>% rename(OTU = taxonomy))
+
+out_merged = out_merged %>% mutate(merged = paste(Phylum,Class,Order,Family,Genus,sep=';'))
+write.csv(out_merged,'association_output_all.csv')
+
+
+ggplot(data = out_merged,aes(x=estimate,y=-log(BY,10))) + ylab('-log10(adjusted p-value)') + geom_label_repel(data = out_merged%>% filter(BY<0.05) %>% arrange(BY),aes(label = Genus),box.padding   = 0.3, point.padding = 0.3,max.overlaps=25,size=6,segment.color = 'grey50')+geom_hline(yintercept = -log(0.05,10)) + ggtitle('Sampling location associations') +geom_vline(xintercept=c(0,10), linetype="dotted") + geom_jitter(aes(alpha=.5,color=term),size=3) + facet_wrap(~term,nrow = 2,ncol=3) + theme(strip.text.x = element_text(size=15))
+ggsave('association_output_all.pdf',width=25,height=15)
+
+```
